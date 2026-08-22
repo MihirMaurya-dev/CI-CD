@@ -1,4 +1,4 @@
-name: 'Terraform Validation & Security Scan'
+name: 'Terraform Validation & Security Scans'
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   terraform-check:
-    name: 'Terraform Plan and Scan'
+    name: 'Terraform Plan and Scans'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -17,25 +17,50 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Required to detect changed files
+        fetch-depth: 0
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
 
-    # Install a security scanner like tfsec (AquaSecurity)
-    - name: Install tfsec
+    - name: Install Security Scanners (tfsec, tflint, trivy, infracost, gitleaks, trufflehog)
       run: |
+        echo "Installing tfsec..."
         curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+        
+        echo "Installing tflint..."
+        curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+        
+        echo "Installing trivy..."
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.49.1
+        
+        echo "Installing infracost..."
+        curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sudo sh
+        
+        echo "Installing gitleaks..."
+        curl -sL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz | tar xz
+        sudo mv gitleaks /usr/local/bin/
+        
+        echo "Installing trufflehog..."
+        curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin
+
+    - name: Run Global Secret Scans
+      run: |
+        echo "--> Running Gitleaks (Full Repo)"
+        gitleaks detect -v --source . || echo "Gitleaks found potential secrets but continuing."
+        
+        echo "--> Running Trufflehog (Full Repo)"
+        trufflehog filesystem . --fail || echo "Trufflehog found potential secrets but continuing."
 
     - name: Get changed files
       id: changed-files
       uses: tj-actions/changed-files@v44
 
     - name: Run Terraform & Security Scans on Modified Folders
+      env:
+        # Note: You need to set INFRACOST_API_KEY in your GitHub Repository Secrets
+        INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
       run: |
         echo "Identifying modified directories..."
-        
-        # Get unique directories from changed files
         changed_files="${{ steps.changed-files.outputs.all_changed_files }}"
         
         if [ -z "$changed_files" ]; then
@@ -47,17 +72,13 @@ jobs:
         for file in $changed_files; do
           dirs+=("$(dirname "$file")")
         done
-        
         unique_dirs=$(printf "%s\n" "${dirs[@]}" | sort -u)
 
         for dir in $unique_dirs; do
-          # Only run if directory still exists and contains .tf files
           if [ -d "$dir" ] && ls "$dir"/*.tf 1> /dev/null 2>&1; then
             echo "===================================================="
             echo "Processing Directory: $dir"
             echo "===================================================="
-            
-            # Go to directory
             cd "$dir"
             
             echo "--> 1. Running Terraform Init"
@@ -69,14 +90,26 @@ jobs:
             echo "--> 3. Running Terraform Validate"
             terraform validate
             
-            echo "--> 4. Running Security Scan (tfsec)"
-            # Note: If using a local Windows self-hosted runner, you could run C:\Tools\checkov.exe instead
-            tfsec . || echo "tfsec found issues but continuing pipeline..."
+            echo "--> 4. Running tfsec"
+            tfsec . || echo "tfsec found issues."
             
-            echo "--> 5. Running Terraform Plan"
+            echo "--> 5. Running tflint"
+            tflint --init
+            tflint || echo "tflint found issues."
+            
+            echo "--> 6. Running Trivy config scan"
+            trivy config . || echo "Trivy found issues."
+            
+            echo "--> 7. Running Infracost"
+            if [ -z "$INFRACOST_API_KEY" ]; then
+              echo "Skipping Infracost: INFRACOST_API_KEY is not set in secrets."
+            else
+              infracost breakdown --path . || echo "Infracost found issues."
+            fi
+            
+            echo "--> 8. Running Terraform Plan"
             terraform plan -out=tfplan
             
-            # Go back to root
             cd $GITHUB_WORKSPACE
           fi
         done
