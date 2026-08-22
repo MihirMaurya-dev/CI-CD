@@ -1,115 +1,135 @@
-name: 'Terraform Validation & Security Scans'
+name: Terraform CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
-  terraform-check:
-    name: 'Terraform Plan and Scans'
+  setup:
+    name: Identify Modified Folders
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-
+    outputs:
+      folders: ${{ steps.filter.outputs.folders }}
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
 
-    - name: Install Security Scanners (tfsec, tflint, trivy, infracost, gitleaks, trufflehog)
-      run: |
-        echo "Installing tfsec..."
-        curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
-        
-        echo "Installing tflint..."
-        curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-        
-        echo "Installing trivy..."
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.49.1
-        
-        echo "Installing infracost..."
-        curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sudo sh
-        
-        echo "Installing gitleaks..."
-        curl -sL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz | tar xz
-        sudo mv gitleaks /usr/local/bin/
-        
-        echo "Installing trufflehog..."
-        curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin
-
-    - name: Run Global Secret Scans
-      run: |
-        echo "--> Running Gitleaks (Full Repo)"
-        gitleaks detect -v --source . || echo "Gitleaks found potential secrets but continuing."
-        
-        echo "--> Running Trufflehog (Full Repo)"
-        trufflehog filesystem . --fail || echo "Trufflehog found potential secrets but continuing."
-
-    - name: Get changed files
-      id: changed-files
-      uses: tj-actions/changed-files@v44
-
-    - name: Run Terraform & Security Scans on Modified Folders
-      env:
-        # Note: You need to set INFRACOST_API_KEY in your GitHub Repository Secrets
-        INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-      run: |
-        echo "Identifying modified directories..."
-        changed_files="${{ steps.changed-files.outputs.all_changed_files }}"
-        
-        if [ -z "$changed_files" ]; then
-          echo "No files changed."
-          exit 0
-        fi
-
-        dirs=()
-        for file in $changed_files; do
-          dirs+=("$(dirname "$file")")
-        done
-        unique_dirs=$(printf "%s\n" "${dirs[@]}" | sort -u)
-
-        for dir in $unique_dirs; do
-          if [ -d "$dir" ] && ls "$dir"/*.tf 1> /dev/null 2>&1; then
-            echo "===================================================="
-            echo "Processing Directory: $dir"
-            echo "===================================================="
-            cd "$dir"
-            
-            echo "--> 1. Running Terraform Init"
-            terraform init -backend=false
-
-            echo "--> 2. Running Terraform Format"
-            terraform fmt -check
-
-            echo "--> 3. Running Terraform Validate"
-            terraform validate
-            
-            echo "--> 4. Running tfsec"
-            tfsec . || echo "tfsec found issues."
-            
-            echo "--> 5. Running tflint"
-            tflint --init
-            tflint || echo "tflint found issues."
-            
-            echo "--> 6. Running Trivy config scan"
-            trivy config . || echo "Trivy found issues."
-            
-            echo "--> 7. Running Infracost"
-            if [ -z "$INFRACOST_API_KEY" ]; then
-              echo "Skipping Infracost: INFRACOST_API_KEY is not set in secrets."
-            else
-              infracost breakdown --path . || echo "Infracost found issues."
+      - name: Filter Terraform folders
+        id: filter
+        run: |
+          changed_files="${{ steps.changed-files.outputs.all_changed_files }}"
+          dirs=()
+          for file in $changed_files; do
+            dir="$(dirname "$file")"
+            if [ -d "$dir" ] && ls "$dir"/*.tf 1> /dev/null 2>&1; then
+              dirs+=("$dir")
             fi
-            
-            echo "--> 8. Running Terraform Plan"
-            terraform plan -out=tfplan
-            
-            cd $GITHUB_WORKSPACE
+          done
+          
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "folders=[]" >> $GITHUB_OUTPUT
+          else
+            unique_dirs=$(printf "%s\n" "${dirs[@]}" | sort -u)
+            json_array=$(printf '%s\n' "$unique_dirs" | jq -R . | jq -s -c .)
+            echo "folders=$json_array" >> $GITHUB_OUTPUT
           fi
-        done
+
+  security-scan-global:
+    name: Global Secret Scans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Gitleaks
+        run: |
+          curl -sL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz | tar xz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Setup Trufflehog
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Run Gitleaks
+        run: gitleaks detect -v --source . || echo "Gitleaks found issues."
+
+      - name: Run Trufflehog
+        run: trufflehog filesystem . --fail || echo "Trufflehog found issues."
+
+  terraform-checks:
+    name: Terraform Plan & Security
+    needs: setup
+    if: ${{ needs.setup.outputs.folders != '[]' && needs.setup.outputs.folders != '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJSON(needs.setup.outputs.folders) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Install Security Scanners
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.49.1
+          curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sudo sh
+
+      - name: Terraform Init
+        working-directory: ${{ matrix.folder }}
+        run: terraform init -backend=false
+
+      - name: Terraform Format
+        working-directory: ${{ matrix.folder }}
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        working-directory: ${{ matrix.folder }}
+        run: terraform validate
+
+      - name: Run tfsec
+        working-directory: ${{ matrix.folder }}
+        run: tfsec . || true
+
+      - name: Run tflint
+        working-directory: ${{ matrix.folder }}
+        run: |
+          tflint --init
+          tflint || true
+
+      - name: Run Trivy
+        working-directory: ${{ matrix.folder }}
+        run: trivy config . || true
+
+      - name: Run Infracost
+        working-directory: ${{ matrix.folder }}
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          if [ -n "$INFRACOST_API_KEY" ]; then
+            infracost breakdown --path . || true
+          else
+            echo "Skipping Infracost (API key not set)"
+          fi
+
+      - name: Terraform Plan
+        working-directory: ${{ matrix.folder }}
+        run: terraform plan -out=tfplan
