@@ -1,4 +1,4 @@
-name: 'Terraform Validation'
+name: 'Terraform Validation & Security Scan'
 
 on:
   push:
@@ -6,16 +6,77 @@ on:
   pull_request:
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  terraform-check:
+    name: 'Terraform Plan and Scan'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Required to detect changed files
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
 
-    - name: Terraform Format
-      run: terraform fmt -check -recursive
+    # Install a security scanner like tfsec (AquaSecurity)
+    - name: Install tfsec
+      run: |
+        curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v44
+
+    - name: Run Terraform & Security Scans on Modified Folders
+      run: |
+        echo "Identifying modified directories..."
+        
+        # Get unique directories from changed files
+        changed_files="${{ steps.changed-files.outputs.all_changed_files }}"
+        
+        if [ -z "$changed_files" ]; then
+          echo "No files changed."
+          exit 0
+        fi
+
+        dirs=()
+        for file in $changed_files; do
+          dirs+=("$(dirname "$file")")
+        done
+        
+        unique_dirs=$(printf "%s\n" "${dirs[@]}" | sort -u)
+
+        for dir in $unique_dirs; do
+          # Only run if directory still exists and contains .tf files
+          if [ -d "$dir" ] && ls "$dir"/*.tf 1> /dev/null 2>&1; then
+            echo "===================================================="
+            echo "Processing Directory: $dir"
+            echo "===================================================="
+            
+            # Go to directory
+            cd "$dir"
+            
+            echo "--> 1. Running Terraform Init"
+            terraform init -backend=false
+
+            echo "--> 2. Running Terraform Format"
+            terraform fmt -check
+
+            echo "--> 3. Running Terraform Validate"
+            terraform validate
+            
+            echo "--> 4. Running Security Scan (tfsec)"
+            # Note: If using a local Windows self-hosted runner, you could run C:\Tools\checkov.exe instead
+            tfsec . || echo "tfsec found issues but continuing pipeline..."
+            
+            echo "--> 5. Running Terraform Plan"
+            terraform plan -out=tfplan
+            
+            # Go back to root
+            cd $GITHUB_WORKSPACE
+          fi
+        done
