@@ -117,6 +117,7 @@ jobs:
       - name: Run TruffleHog
         run: |
           trufflehog filesystem . \
+            --no-update \
             --fail
 
   # ============================================================
@@ -328,3 +329,4 @@ jobs:
           terraform plan \
             -input=false \
             -out=tfplan
+
