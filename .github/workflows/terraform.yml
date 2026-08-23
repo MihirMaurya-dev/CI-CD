@@ -168,7 +168,10 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # ========================================================
       # Configure Terraform Azure credentials
@@ -177,38 +180,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          CLIENT_ID="$(jq -r '.clientId' <<< "$AZURE_CREDENTIALS")"
-          CLIENT_SECRET="$(jq -r '.clientSecret' <<< "$AZURE_CREDENTIALS")"
-          TENANT_ID="$(jq -r '.tenantId' <<< "$AZURE_CREDENTIALS")"
-          SUBSCRIPTION_ID="$(jq -r '.subscriptionId' <<< "$AZURE_CREDENTIALS")"
-
-          if [[ -z "$CLIENT_ID" || "$CLIENT_ID" == "null" ]]; then
-            echo "ERROR: clientId is missing from AZURE_CREDENTIALS"
-            exit 1
-          fi
-
-          if [[ -z "$CLIENT_SECRET" || "$CLIENT_SECRET" == "null" ]]; then
-            echo "ERROR: clientSecret is missing from AZURE_CREDENTIALS"
-            exit 1
-          fi
-
-          if [[ -z "$TENANT_ID" || "$TENANT_ID" == "null" ]]; then
-            echo "ERROR: tenantId is missing from AZURE_CREDENTIALS"
-            exit 1
-          fi
-
-          if [[ -z "$SUBSCRIPTION_ID" || "$SUBSCRIPTION_ID" == "null" ]]; then
-            echo "ERROR: subscriptionId is missing from AZURE_CREDENTIALS"
-            exit 1
-          fi
-
-          echo "ARM_CLIENT_ID=$CLIENT_ID" >> "$GITHUB_ENV"
-          echo "ARM_CLIENT_SECRET=$CLIENT_SECRET" >> "$GITHUB_ENV"
-          echo "ARM_TENANT_ID=$TENANT_ID" >> "$GITHUB_ENV"
-          echo "ARM_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" >> "$GITHUB_ENV"
-
-          echo "Azure Terraform credentials configured successfully."
+          
+          echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_ENV"
+          echo "ARM_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> "$GITHUB_ENV"
+          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> "$GITHUB_ENV"
+          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> "$GITHUB_ENV"
 
       # ========================================================
       # Terraform
@@ -313,16 +289,6 @@ jobs:
           trivy config .
 
       # ========================================================
-      # Infracost
-      # ========================================================
-      - name: Run Infracost
-        if: ${{ env.INFRACOST_API_KEY != '' }}
-        working-directory: ${{ matrix.folder }}
-        run: |
-          infracost breakdown \
-            --path .
-
-      # ========================================================
       # Terraform Plan
       # ========================================================
       - name: Terraform Plan
@@ -332,4 +298,12 @@ jobs:
             -input=false \
             -out=tfplan
 
-
+      # ========================================================
+      # Infracost
+      # ========================================================
+      - name: Run Infracost
+        if: ${{ env.INFRACOST_API_KEY != '' }}
+        working-directory: ${{ matrix.folder }}
+        run: |
+          infracost breakdown \
+            --path .
