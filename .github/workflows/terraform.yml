@@ -331,4 +331,4 @@ jobs:
         working-directory: ${{ matrix.folder }}
         run: |
           infracost breakdown \
-            --path .
+            --path tfplan
