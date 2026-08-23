@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature
   pull_request:
     branches:
       - main
@@ -124,27 +125,20 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIAL }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Export Azure credentials for Terraform
+      - name: Configure Terraform Azure credentials
         shell: bash
-        env:
-          AZURE_CREDENTIAL: ${{ secrets.AZURE_CREDENTIAL }}
         run: |
           set -euo pipefail
-
-          CLIENT_ID="$(jq -r '.clientId // .appId // empty' <<< "$AZURE_CREDENTIAL")"
-          CLIENT_SECRET="$(jq -r '.clientSecret // .password // empty' <<< "$AZURE_CREDENTIAL")"
-          TENANT_ID="$(jq -r '.tenantId // .tenant // empty' <<< "$AZURE_CREDENTIAL")"
-          SUBSCRIPTION_ID="$(jq -r '.subscriptionId // empty' <<< "$AZURE_CREDENTIAL")"
-
-          echo "ARM_CLIENT_ID=$CLIENT_ID" >> "$GITHUB_ENV"
-          echo "ARM_CLIENT_SECRET=$CLIENT_SECRET" >> "$GITHUB_ENV"
-          echo "ARM_TENANT_ID=$TENANT_ID" >> "$GITHUB_ENV"
-
-          if [[ -n "$SUBSCRIPTION_ID" ]]; then
-            echo "ARM_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" >> "$GITHUB_ENV"
-          fi
+          
+          echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_ENV"
+          echo "ARM_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> "$GITHUB_ENV"
+          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> "$GITHUB_ENV"
+          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> "$GITHUB_ENV"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
