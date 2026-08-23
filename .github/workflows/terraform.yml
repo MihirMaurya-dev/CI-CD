@@ -116,7 +116,9 @@ jobs:
 
       - name: Run TruffleHog
         run: |
+          echo "\.git/.*" > .trufflehog-ignore
           trufflehog filesystem . \
+            --exclude-paths .trufflehog-ignore \
             --no-update \
             --fail
 
@@ -329,4 +331,5 @@ jobs:
           terraform plan \
             -input=false \
             -out=tfplan
+
 
