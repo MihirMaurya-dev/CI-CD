@@ -11,3 +11,5 @@ module "virtual_network" {
   location      = module.resource_group.rg_location
   rg_name       = module.resource_group.rg_name
 }
+
+# Trigger CI/CD

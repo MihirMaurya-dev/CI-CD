@@ -52,6 +52,11 @@ jobs:
 
             dir="$(dirname "$file")"
 
+            # Skip child modules since they cannot be planned independently
+            if [[ "$dir" == *"modules"* ]]; then
+              continue
+            fi
+
             if [[ -d "$dir" ]] && compgen -G "$dir/*.tf" > /dev/null; then
               dirs["$dir"]=1
             fi
@@ -168,23 +173,43 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # Fallback logic to support various spellings of the secret
+          creds: ${{ secrets.AZURE_CREDENTIALS || secrets.AZURE_CREDINTIALS || secrets.AZURE_CREDENTIAL }}
 
       # ========================================================
       # Configure Terraform Azure credentials
       # ========================================================
       - name: Configure Terraform Azure credentials
         shell: bash
+        env:
+          JSON_CREDS: ${{ secrets.AZURE_CREDENTIALS || secrets.AZURE_CREDINTIALS || secrets.AZURE_CREDENTIAL }}
         run: |
           set -euo pipefail
-          
-          echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_ENV"
-          echo "ARM_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> "$GITHUB_ENV"
-          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> "$GITHUB_ENV"
-          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> "$GITHUB_ENV"
+
+          CLIENT_ID="$(jq -r '.clientId // .appId // empty' <<< "$JSON_CREDS")"
+          CLIENT_SECRET="$(jq -r '.clientSecret // .password // empty' <<< "$JSON_CREDS")"
+          TENANT_ID="$(jq -r '.tenantId // .tenant // empty' <<< "$JSON_CREDS")"
+          SUBSCRIPTION_ID="$(jq -r '.subscriptionId // empty' <<< "$JSON_CREDS")"
+
+          if [[ -z "$CLIENT_ID" || "$CLIENT_ID" == "null" ]]; then
+            echo "ERROR: clientId is missing from your JSON secret"
+            exit 1
+          fi
+
+          if [[ -z "$TENANT_ID" || "$TENANT_ID" == "null" ]]; then
+            echo "ERROR: tenantId is missing from your JSON secret"
+            exit 1
+          fi
+
+          echo "ARM_CLIENT_ID=$CLIENT_ID" >> "$GITHUB_ENV"
+          echo "ARM_CLIENT_SECRET=$CLIENT_SECRET" >> "$GITHUB_ENV"
+          echo "ARM_TENANT_ID=$TENANT_ID" >> "$GITHUB_ENV"
+
+          if [[ -n "$SUBSCRIPTION_ID" && "$SUBSCRIPTION_ID" != "null" ]]; then
+            echo "ARM_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" >> "$GITHUB_ENV"
+          fi
+
+          echo "Azure Terraform credentials configured successfully."
 
       # ========================================================
       # Terraform
