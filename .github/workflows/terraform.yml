@@ -52,6 +52,11 @@ jobs:
 
             dir="$(dirname "$file")"
 
+            # Skip child modules since they cannot be planned independently
+            if [[ "$dir" == *"modules"* ]]; then
+              continue
+            fi
+
             if [[ -d "$dir" ]] && compgen -G "$dir/*.tf" > /dev/null; then
               dirs["$dir"]=1
             fi
