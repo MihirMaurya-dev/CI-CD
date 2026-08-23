@@ -90,10 +90,10 @@ jobs:
 
       - name: Export Azure Credentials for Terraform
         run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIAL }}' | jq -r '.clientId // .appId // empty')
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIAL }}' | jq -r '.clientSecret // .password // empty')
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIAL }}' | jq -r '.tenantId // .tenant // empty')
-          SUB_ID=$(echo '${{ secrets.AZURE_CREDENTIAL }}' | jq -r '.subscriptionId // empty')
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r '.clientId // .appId // empty')
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r '.clientSecret // .password // empty')
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r '.tenantId // .tenant // empty')
+          SUB_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r '.subscriptionId // empty')
           
           echo "ARM_CLIENT_ID=$CLIENT_ID" >> $GITHUB_ENV
           echo "ARM_CLIENT_SECRET=$CLIENT_SECRET" >> $GITHUB_ENV
