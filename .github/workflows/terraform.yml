@@ -1,334 +1,187 @@
-name: Terraform CI/CD
+name: Enterprise Terraform CI/CD
 
 on:
   push:
-    branches:
-      - main
-      - feature
-
+    branches: [ "main", "feature" ]
   pull_request:
-    branches:
-      - main
+    branches: [ "main" ]
 
 permissions:
   contents: read
 
 jobs:
-
   # ============================================================
-  # Identify modified Terraform folders
+  # 1. Identify Modified Terraform Folders (Dynamic Matrix)
   # ============================================================
   setup:
-    name: Identify Modified Terraform Folders
+    name: Identify Modified Folders
     runs-on: ubuntu-latest
-
     outputs:
-      folders: ${{ steps.filter.outputs.folders }}
-
+      folders: ${{ steps.changed-dirs.outputs.all_changed_files }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Get changed files
-        id: changed-files
+      - name: Get changed Terraform folders
+        id: changed-dirs
         uses: tj-actions/changed-files@v47
         with:
-          separator: "\n"
-
-      - name: Identify Terraform folders
-        id: filter
-        shell: bash
-        env:
-          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-        run: |
-          set -euo pipefail
-
-          declare -A dirs=()
-
-          while IFS= read -r file; do
-            [[ -z "$file" ]] && continue
-
-            dir="$(dirname "$file")"
-
-            # Skip child modules since they cannot be planned independently
-            if [[ "$dir" == *"modules"* ]]; then
-              continue
-            fi
-
-            if [[ -d "$dir" ]] && compgen -G "$dir/*.tf" > /dev/null; then
-              dirs["$dir"]=1
-            fi
-
-          done <<< "$CHANGED_FILES"
-
-          if [[ ${#dirs[@]} -eq 0 ]]; then
-            echo 'folders=[]' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          folders=$(
-            printf '%s\n' "${!dirs[@]}" |
-            sort |
-            jq -R -s -c 'split("\n") | map(select(length > 0))'
-          )
-
-          echo "folders=$folders" >> "$GITHUB_OUTPUT"
+          files: '**/*.tf'
+          files_ignore: '**/modules/**' # Exclude child modules 
+          dir_names: true               # Output only directory names
+          json: true                    # Output as JSON array for the matrix
+          escape_json: false            
 
   # ============================================================
-  # Global secret scanning
+  # 2. Global Security Scanning
   # ============================================================
-  security-scan-global:
-    name: Global Secret Scans
+  security-scan:
+    name: Secret & Vulnerability Scans
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # --------------------------------------------------------
-      # Gitleaks
-      # --------------------------------------------------------
-      - name: Install Gitleaks
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          curl -sSfL \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz \
-            | tar -xz
-
-          sudo install gitleaks /usr/local/bin/gitleaks
-
-      - name: Run Gitleaks
-        run: |
-          gitleaks detect \
-            --source . \
-            --verbose
-
-      # --------------------------------------------------------
-      # TruffleHog
-      # --------------------------------------------------------
-      - name: Install TruffleHog
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          curl -sSfL \
-            https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-            | sudo sh -s -- -b /usr/local/bin
-
-      - name: Run TruffleHog
-        run: |
-          echo "\.git/.*" > .trufflehog-ignore
-          trufflehog filesystem . \
-            --exclude-paths .trufflehog-ignore \
-            --no-update \
-            --fail
-
-  # ============================================================
-  # Terraform checks
-  # ============================================================
-  terraform-checks:
-    name: Terraform Checks
-
-    needs:
-      - setup
-
-    if: ${{ needs.setup.outputs.folders != '[]' && needs.setup.outputs.folders != '' }}
-
-    runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-
-      matrix:
-        folder: ${{ fromJSON(needs.setup.outputs.folders) }}
-
-    env:
-      # --------------------------------------------------------
-      # Terraform Azure authentication
-      # --------------------------------------------------------
-      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
-
-      # --------------------------------------------------------
-      # Infracost
-      # --------------------------------------------------------
-      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-
-    steps:
-
-      # ========================================================
-      # Checkout
-      # ========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ========================================================
-      # Azure Authentication
-      # ========================================================
+      - name: Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: TruffleHog Scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+  # ============================================================
+  # 3. Terraform Checks & Plan
+  # ============================================================
+  terraform-checks:
+    name: Terraform Checks & Plan
+    needs: setup
+    if: ${{ needs.setup.outputs.folders != '[]' && needs.setup.outputs.folders != '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJSON(needs.setup.outputs.folders) }}
+    env:
+      ARM_USE_CLI: true # Tells Terraform to use the auth token from azure/login
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Azure Login
         uses: azure/login@v2
         with:
-          # Fallback logic to support various spellings of the secret
-          creds: ${{ secrets.AZURE_CREDENTIALS || secrets.AZURE_CREDINTIALS || secrets.AZURE_CREDENTIAL }}
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # ========================================================
-      # Configure Terraform Azure credentials
-      # ========================================================
-      - name: Configure Terraform Azure credentials
-        shell: bash
-        env:
-          JSON_CREDS: ${{ secrets.AZURE_CREDENTIALS || secrets.AZURE_CREDINTIALS || secrets.AZURE_CREDENTIAL }}
-        run: |
-          set -euo pipefail
-
-          CLIENT_ID="$(jq -r '.clientId // .appId // empty' <<< "$JSON_CREDS")"
-          CLIENT_SECRET="$(jq -r '.clientSecret // .password // empty' <<< "$JSON_CREDS")"
-          TENANT_ID="$(jq -r '.tenantId // .tenant // empty' <<< "$JSON_CREDS")"
-          SUBSCRIPTION_ID="$(jq -r '.subscriptionId // empty' <<< "$JSON_CREDS")"
-
-          if [[ -z "$CLIENT_ID" || "$CLIENT_ID" == "null" ]]; then
-            echo "ERROR: clientId is missing from your JSON secret"
-            exit 1
-          fi
-
-          if [[ -z "$TENANT_ID" || "$TENANT_ID" == "null" ]]; then
-            echo "ERROR: tenantId is missing from your JSON secret"
-            exit 1
-          fi
-
-          echo "ARM_CLIENT_ID=$CLIENT_ID" >> "$GITHUB_ENV"
-          echo "ARM_CLIENT_SECRET=$CLIENT_SECRET" >> "$GITHUB_ENV"
-          echo "ARM_TENANT_ID=$TENANT_ID" >> "$GITHUB_ENV"
-
-          if [[ -n "$SUBSCRIPTION_ID" && "$SUBSCRIPTION_ID" != "null" ]]; then
-            echo "ARM_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" >> "$GITHUB_ENV"
-          fi
-
-          echo "Azure Terraform credentials configured successfully."
-
-      # ========================================================
-      # Terraform
-      # ========================================================
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.8
 
-      # ========================================================
-      # TFLint
-      # ========================================================
-      - name: Setup TFLint
+      - name: Terraform Init
+        working-directory: ${{ matrix.folder }}
+        run: terraform init -input=false
+
+      - name: Terraform Format & Validate
+        working-directory: ${{ matrix.folder }}
+        run: |
+          terraform fmt -check -recursive
+          terraform validate
+
+      - name: Run Security Scans (tfsec & Trivy)
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: ${{ matrix.folder }}
+          
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: ${{ matrix.folder }}
+          hide-progress: true
+
+      - name: Run TFLint
         uses: terraform-linters/setup-tflint@v4
-        with:
-          tflint_version: latest
+        
+      - name: Init & Run TFLint
+        working-directory: ${{ matrix.folder }}
+        run: tflint --init && tflint
 
-      # ========================================================
-      # tfsec
-      # ========================================================
-      - name: Install tfsec
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Terraform Plan
+        working-directory: ${{ matrix.folder }}
+        run: terraform plan -input=false -out=tfplan
 
-          curl -sSfL \
-            https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh \
-            | bash
-
-      # ========================================================
-      # Trivy
-      # ========================================================
-      - name: Install Trivy
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          curl -sfL \
-            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sudo sh -s -- -b /usr/local/bin latest
-
-      # ========================================================
-      # Infracost
-      # ========================================================
-      - name: Setup Infracost
+      - name: Setup & Run Infracost
         if: ${{ env.INFRACOST_API_KEY != '' }}
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ env.INFRACOST_API_KEY }}
-
-      # ========================================================
-      # Terraform Init
-      # ========================================================
-      - name: Terraform Init
-        working-directory: ${{ matrix.folder }}
-        run: |
-          terraform init \
-            -backend=false \
-            -input=false
-
-      # ========================================================
-      # Terraform Format
-      # ========================================================
-      - name: Terraform Format Check
-        working-directory: ${{ matrix.folder }}
-        run: |
-          terraform fmt \
-            -check \
-            -recursive
-
-      # ========================================================
-      # Terraform Validate
-      # ========================================================
-      - name: Terraform Validate
-        working-directory: ${{ matrix.folder }}
-        run: |
-          terraform validate
-
-      # ========================================================
-      # tfsec Security Scan
-      # ========================================================
-      - name: Run tfsec
-        working-directory: ${{ matrix.folder }}
-        run: |
-          tfsec .
-
-      # ========================================================
-      # TFLint
-      # ========================================================
-      - name: Run TFLint
-        working-directory: ${{ matrix.folder }}
-        run: |
-          tflint --init
-          tflint
-
-      # ========================================================
-      # Trivy Security Scan
-      # ========================================================
-      - name: Run Trivy
-        working-directory: ${{ matrix.folder }}
-        run: |
-          trivy config .
-
-      # ========================================================
-      # Terraform Plan
-      # ========================================================
-      - name: Terraform Plan
-        working-directory: ${{ matrix.folder }}
-        run: |
-          terraform plan \
-            -input=false \
-            -out=tfplan
-
-      # ========================================================
-      # Infracost
-      # ========================================================
-      - name: Run Infracost
+          
+      - name: Run Infracost Breakdown
         if: ${{ env.INFRACOST_API_KEY != '' }}
         working-directory: ${{ matrix.folder }}
+        run: infracost breakdown --path tfplan
+
+      - name: Create Slug & Upload Plan
         run: |
-          infracost breakdown \
-            --path .
+          SLUG=$(echo '${{ matrix.folder }}' | tr '/' '-')
+          echo "SLUG=$SLUG" >> $GITHUB_ENV
+          
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ env.SLUG }}
+          path: ${{ matrix.folder }}/tfplan
+          retention-days: 1
+
+  # ============================================================
+  # 4. Terraform Apply (Main Branch Only)
+  # ============================================================
+  terraform-apply:
+    name: Terraform Apply
+    needs: [setup, terraform-checks]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJSON(needs.setup.outputs.folders) }}
+    env:
+      ARM_USE_CLI: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: ${{ matrix.folder }}
+        run: terraform init -input=false
+
+      - name: Create Slug & Download Plan
+        run: |
+          SLUG=$(echo '${{ matrix.folder }}' | tr '/' '-')
+          echo "SLUG=$SLUG" >> $GITHUB_ENV
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ env.SLUG }}
+          path: ${{ matrix.folder }}
+
+      - name: Terraform Apply
+        working-directory: ${{ matrix.folder }}
+        run: terraform apply -auto-approve tfplan
